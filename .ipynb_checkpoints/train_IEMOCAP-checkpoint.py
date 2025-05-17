@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import argparse, time, pickle
 import torch
@@ -6,13 +7,14 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from sklearn.metrics import f1_score, confusion_matrix, accuracy_score, classification_report
-from dataloader import MELDDataset,Dataset_M
-from model import LSTMModel, MaskedFocalLoss, MELDLSTMModel
+from models import LSTMModel, MaskedFocalLoss
+from dataloader import IEMOCAPDataset,Dataset_I
 
-
-import warnings
-warnings.filterwarnings('always')
-
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    
 
 def get_train_valid_sampler(trainset, valid=0.1):
     size = len(trainset)
@@ -21,9 +23,11 @@ def get_train_valid_sampler(trainset, valid=0.1):
     return SubsetRandomSampler(idx[split:]), SubsetRandomSampler(idx[:split])
 
 
-def get_MELD_loaders(path, batch_size=32, valid=0.1, classify='emotion', num_workers=0, pin_memory=False):
-    trainset = MELDDataset(path, classify)
-    testset = MELDDataset(path, classify, train=False)
+def get_IEMOCAP_loaders(path, batch_size=32, valid=0.1, num_workers=0, pin_memory=False):
+    trainset = Dataset_I(path=path)
+    # trainset = IEMOCAPDataset(path=path,'train')
+    validset = IEMOCAPDataset(path,'valid')
+    testset = IEMOCAPDataset(path,'test')
 
     train_sampler, valid_sampler = get_train_valid_sampler(trainset, valid)
     train_loader = DataLoader(trainset,
@@ -32,7 +36,7 @@ def get_MELD_loaders(path, batch_size=32, valid=0.1, classify='emotion', num_wor
                               collate_fn=trainset.collate_fn,
                               num_workers=num_workers,
                               pin_memory=pin_memory)
-    valid_loader = DataLoader(trainset,
+    valid_loader = DataLoader(validset,
                               batch_size=batch_size,
                               sampler=valid_sampler,
                               collate_fn=trainset.collate_fn,
@@ -59,16 +63,29 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
     else:
         model.eval()
     for data in dataloader:
+        print(data)
         if train:
             optimizer.zero_grad()
 
-        textf, acouf, qmask, umask, label = \
+        r1,r2,r3,r4, visuf, acouf, uu, sk, lk, nu, qmask, umask, label = \
             [d.cuda() for d in data[:-1]] if cuda else data[:-1]
+        
+        # test > show shapes
+        #print("textf.shape: ", textf.shape) # seq_len, batch_size, 100
+        #print("visuf.shape: ", visuf.shape) # seq_len, batch_size, 256
+        #print("acouf.shape: ", acouf.shape) # seq_len, batch_size, 100
+        # print("qmask.shape: ", qmask.shape) # seq_len, batch_size, 2
+        # print("umask.shape: ", umask.shape) # seq_len, batch_size
+        # print("label.shape: ", label.shape) # seq_len, batch_size
+        # 打印方差、均值
+        # print(f"textf.var: {textf.var()}, textf.mean: {textf.mean()}")
+        # print(f"visuf.var: {visuf.var()}, visuf.mean: {visuf.mean()}")
+        # print(f"acouf.var: {acouf.var()}, acouf.mean: {acouf.mean()}")
+        # sys.exit()
+        # test < show shapes
 
-
-        # log_prob = model(torch.cat((textf, acouf), dim=-1), qmask, umask)
-        # log_prob, alpha, alpha_f, alpha_b = model(torch.cat((textf, acouf), dim=-1), qmask, umask)
-        log_prob, alpha, alpha_f, alpha_b = model(textf, qmask, umask)
+        # log_prob = model(torch.cat((textf, acouf, visuf), dim=-1), qmask, umask)
+        log_prob, alpha, alpha_f, alpha_b = model(torch.cat((textf, visuf,acouf), dim=-1), qmask, umask,uu,sk,lk,nu)
         lp_ = log_prob.transpose(0, 1).contiguous().view(-1, log_prob.size()[2])
         labels_ = label.view(-1)
         loss = loss_function(lp_, labels_, umask)
@@ -107,18 +124,21 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=4027, metavar='S', help='random seed (default: 4027)')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='does not use GPU')
-    parser.add_argument('--lr', type=float, default=0.0003, metavar='LR', help='learning rate')
-    parser.add_argument('--l2', type=float, default=0.0001, metavar='L2', help='L2 regularization weight')
-    parser.add_argument('--dropout', type=float, default=0.6, metavar='dropout', help='dropout rate')
+    parser.add_argument('--lr', type=float, default=0.0001, metavar='LR', help='learning rate')
+    parser.add_argument('--l2', type=float, default=0.00001, metavar='L2', help='L2 regularization weight')
+    parser.add_argument('--dropout', type=float, default=0.25, metavar='dropout', help='dropout rate')
     parser.add_argument('--batch-size', type=int, default=32, metavar='BS', help='batch size')
-    parser.add_argument('--epochs', type=int, default=50, metavar='E', help='number of epochs')
-    parser.add_argument('--attention', action='store_true', default=True, help='use attention on top of lstm')
+    parser.add_argument('--epochs', type=int, default=80, metavar='E', help='number of epochs')
+    parser.add_argument('--class-weight', action='store_true', default=False, help='use class weight')
+    parser.add_argument('--attention', action='store_true', default=False, help='use attention on top of lstm')
     parser.add_argument('--tensorboard', action='store_true', default=False, help='Enables tensorboard log')
-    parser.add_argument('--classify', default='emotion', help='classify emotion or sentiment')
     args = parser.parse_args()
 
     print(args)
+
+    set_seed(args.seed)
 
     args.cuda = torch.cuda.is_available() and not args.no_cuda
     if args.cuda:
@@ -135,33 +155,40 @@ if __name__ == '__main__':
     cuda = args.cuda
     n_epochs = args.epochs
 
-    if args.classify == 'emotion':
-        n_classes = 7
-    elif args.classify == 'sentiment':
-        n_classes = 3
-
-    D_m = 600
+    n_classes = 6
+    D_r = 100
+    D_m = 456
     D_e = 300
-    D_h = 600
+    D_h = 300
+    D_u = 300
+    D_k = 100
+    
 
-    model = MELDLSTMModel(D_m, D_e, D_h,
+    
+    path = 'iemocap/iemocap_data.pkl'
+
+    model = LSTMModel(D_u, D_k, D_r, D_m, D_e, D_h,
                       n_classes=n_classes,
                       dropout=args.dropout,
-                      )
+                      attention=args.attention)
     if cuda:
         model.cuda()
 
-    loss_function = MaskedNLLLoss()
-    optimizer = optim.Adam(model.parameters(),
+    loss_weights = torch.FloatTensor([1.0, 0.60072, 0.38066, 0.54019, 0.67924, 0.34332])
+
+    if args.class_weight:
+        loss_function = MaskedFocalLoss(loss_weights.cuda() if cuda else loss_weights)
+    else:
+        loss_function = MaskedFocalLoss()
+    optimizer = optim.AdamW(model.parameters(),
                            lr=args.lr,
                            weight_decay=args.l2)
 
-    train_loader, valid_loader, test_loader = get_MELD_loaders('data/meld/MELD_features_raw.pkl',
-                                                               batch_size=batch_size,
-                                                               valid=0.0,
-                                                               classify=args.classify)
+    train_loader, valid_loader, test_loader = get_IEMOCAP_loaders(path=path,
+                                                                  batch_size=batch_size,
+                                                                  valid=0.0)
 
-    best_fscore, best_loss, best_label, best_pred, best_mask = None, None, None, None, None
+    best_loss, best_label, best_pred, best_mask = None, None, None, None
 
     for e in range(n_epochs):
         start_time = time.time()
@@ -171,21 +198,19 @@ if __name__ == '__main__':
         test_loss, test_acc, test_label, test_pred, test_mask, test_fscore, attentions = train_or_eval_model(model,
                                                                                                              loss_function,
                                                                                                              test_loader,
-                                                                                                     e)
-        if best_fscore == None or best_fscore < test_fscore:
-            best_fscore, best_loss, best_label, best_pred, best_mask, best_attn = \
-                test_fscore, test_loss, test_label, test_pred, test_mask, attentions
+                                                                                                             e)
+
+        if best_loss == None or best_loss > test_loss:
+            best_loss, best_label, best_pred, best_mask, best_attn = \
+                test_loss, test_label, test_pred, test_mask, attentions
 
         if args.tensorboard:
             writer.add_scalar('test: accuracy/loss', test_acc / test_loss, e)
             writer.add_scalar('train: accuracy/loss', train_acc / train_loss, e)
         print(
-            'epoch {} train_loss {} train_acc {} train_fscore {} valid_loss {} valid_acc {} val_fscore {} test_loss {} test_acc {} test_fscore {} time {}'. \
+            '===========epoch {}===========\n train_loss {} train_acc {} train_fscore {}\n valid_loss {} valid_acc {} val_fscore {}\n test_loss {} test_acc {} test_fscore {}\n time {}'. \
             format(e + 1, train_loss, train_acc, train_fscore, valid_loss, valid_acc, val_fscore, \
                    test_loss, test_acc, test_fscore, round(time.time() - start_time, 2)))
-
-        print(classification_report(test_label, test_pred, sample_weight=test_mask, digits=4))
-
     if args.tensorboard:
         writer.close()
 

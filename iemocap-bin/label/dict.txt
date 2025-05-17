@@ -1,0 +1,12 @@
+5 1296
+2 1221
+3 831
+1 771
+4 591
+0 451
+madeupword0000 0
+madeupword0001 0
+madeupword0002 0
+madeupword0003 0
+madeupword0004 0
+madeupword0005 0

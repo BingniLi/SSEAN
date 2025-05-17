@@ -6,8 +6,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from sklearn.metrics import f1_score, confusion_matrix, accuracy_score, classification_report
-from dataloader import MELDDataset,Dataset_M
-from model import LSTMModel, MaskedFocalLoss, MELDLSTMModel
+from dataloader import MELDDataset
+from model import LSTMModel, MaskedNLLLoss, MELDLSTMModel
 
 
 import warnings
